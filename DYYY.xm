@@ -226,6 +226,12 @@ static __weak AWEAwemeModel *dyyyCurrentSpeedAweme = nil;
 static NSString *dyyyLastAutoRestoredSpeedAwemeIdentifier = nil;
 static BOOL dyyyLongPressFastSpeedActive = NO;
 static BOOL dyyyLongPressLockedSpeedActive = NO;
+static NSString *const kDYYYKeepPrivateAwemeKey = @"DYYYKeepPrivateAweme";
+static char kDYYYPrivateAwemeFlagKey;
+static char kDYYYPrivateAwemeSeenIDsKey;
+static char kDYYYPrivateAwemeIndexByIDKey;
+static char kDYYYPrivateAwemeCellModelKey;
+static char kDYYYPrivateAwemeBadgeKey;
 
 static void DYYYClearLongPressSpeedState(void) {
     dyyyLongPressFastSpeedActive = NO;
@@ -278,6 +284,255 @@ static NSString *DYYYSpeedAwemeIdentifier(AWEAwemeModel *aweme) {
         return aweme.itemID;
     }
     return [NSString stringWithFormat:@"%p", aweme];
+}
+
+static BOOL DYYYShouldKeepPrivateAweme(void) {
+    return DYYYGetBool(kDYYYKeepPrivateAwemeKey);
+}
+
+static NSString *DYYYPrivateAwemeIdentifier(id aweme) {
+    if (!aweme) {
+        return nil;
+    }
+
+    for (NSString *key in @[ @"itemID", @"awemeId", @"awemeID", @"aid" ]) {
+        @try {
+            id value = [aweme valueForKey:key];
+            if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+                return value;
+            }
+            if ([value respondsToSelector:@selector(stringValue)]) {
+                NSString *stringValue = [value stringValue];
+                if (stringValue.length > 0) {
+                    return stringValue;
+                }
+            }
+        } @catch (__unused NSException *exception) {
+        }
+    }
+
+    return nil;
+}
+
+static id DYYYAwemeFromPotentialWrapper(id object) {
+    Class awemeClass = NSClassFromString(@"AWEAwemeModel");
+    if (!object || !awemeClass) {
+        return nil;
+    }
+    if ([object isKindOfClass:awemeClass]) {
+        return object;
+    }
+
+    for (NSString *key in @[ @"awemeModel", @"aweme", @"model", @"item" ]) {
+        @try {
+            id value = [object valueForKey:key];
+            if ([value isKindOfClass:awemeClass]) {
+                return value;
+            }
+        } @catch (__unused NSException *exception) {
+        }
+    }
+
+    return nil;
+}
+
+static NSMutableSet<NSString *> *DYYYPrivateAwemeIDs(void) {
+    static NSMutableSet<NSString *> *privateIDs = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      privateIDs = [NSMutableSet set];
+    });
+    return privateIDs;
+}
+
+static NSMutableDictionary<NSString *, id> *DYYYPrivateAwemeCache(void) {
+    static NSMutableDictionary<NSString *, id> *privateAwemes = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      privateAwemes = [NSMutableDictionary dictionary];
+    });
+    return privateAwemes;
+}
+
+static BOOL DYYYPrivateAwemeToastIndicatesUnavailable(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+
+    return [text containsString:@"当前内容为非公开"] ||
+           [text containsString:@"内容为非公开"] ||
+           [text containsString:@"非公开视频"];
+}
+
+static void DYYYMarkAwemeAsPrivateUnavailable(id aweme) {
+    if (!DYYYShouldKeepPrivateAweme()) {
+        return;
+    }
+
+    id resolvedAweme = DYYYAwemeFromPotentialWrapper(aweme);
+    NSString *identifier = DYYYPrivateAwemeIdentifier(resolvedAweme);
+    if (identifier.length == 0) {
+        return;
+    }
+
+    objc_setAssociatedObject(resolvedAweme, &kDYYYPrivateAwemeFlagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSMutableSet<NSString *> *privateIDs = DYYYPrivateAwemeIDs();
+    NSMutableDictionary<NSString *, id> *privateAwemes = DYYYPrivateAwemeCache();
+    @synchronized(privateIDs) {
+        [privateIDs addObject:identifier];
+        privateAwemes[identifier] = resolvedAweme;
+    }
+}
+
+static BOOL DYYYIsPrivateUnavailableAweme(id aweme) {
+    if (!aweme) {
+        return NO;
+    }
+    if (objc_getAssociatedObject(aweme, &kDYYYPrivateAwemeFlagKey)) {
+        return YES;
+    }
+
+    NSString *identifier = DYYYPrivateAwemeIdentifier(aweme);
+    if (identifier.length == 0) {
+        return NO;
+    }
+
+    NSMutableSet<NSString *> *privateIDs = DYYYPrivateAwemeIDs();
+    @synchronized(privateIDs) {
+        return [privateIDs containsObject:identifier];
+    }
+}
+
+static void DYYYRememberDataControllerAwemes(id controller, NSArray *array) {
+    if (!controller || ![array isKindOfClass:[NSArray class]]) {
+        return;
+    }
+
+    NSMutableSet<NSString *> *seenIDs = objc_getAssociatedObject(controller, &kDYYYPrivateAwemeSeenIDsKey);
+    if (!seenIDs) {
+        seenIDs = [NSMutableSet set];
+        objc_setAssociatedObject(controller, &kDYYYPrivateAwemeSeenIDsKey, seenIDs, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    NSMutableDictionary<NSString *, NSNumber *> *indexByID = objc_getAssociatedObject(controller, &kDYYYPrivateAwemeIndexByIDKey);
+    if (!indexByID) {
+        indexByID = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(controller, &kDYYYPrivateAwemeIndexByIDKey, indexByID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    [array enumerateObjectsUsingBlock:^(id object, NSUInteger idx, BOOL *stop) {
+      id aweme = DYYYAwemeFromPotentialWrapper(object);
+      NSString *identifier = DYYYPrivateAwemeIdentifier(aweme);
+      if (identifier.length == 0) {
+          return;
+      }
+
+      [seenIDs addObject:identifier];
+      indexByID[identifier] = @(idx);
+      if (DYYYIsPrivateUnavailableAweme(aweme)) {
+          objc_setAssociatedObject(aweme, &kDYYYPrivateAwemeFlagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+          NSMutableSet<NSString *> *privateIDs = DYYYPrivateAwemeIDs();
+          NSMutableDictionary<NSString *, id> *privateAwemes = DYYYPrivateAwemeCache();
+          @synchronized(privateIDs) {
+              [privateIDs addObject:identifier];
+              privateAwemes[identifier] = object;
+          }
+      }
+    }];
+}
+
+static id DYYYDataSourceByKeepingPrivateAwemes(id controller, id dataSource) {
+    if (!DYYYShouldKeepPrivateAweme() || ![dataSource isKindOfClass:[NSArray class]]) {
+        return dataSource;
+    }
+
+    NSArray *source = (NSArray *)dataSource;
+    NSMutableSet<NSString *> *previousIDs = objc_getAssociatedObject(controller, &kDYYYPrivateAwemeSeenIDsKey);
+    NSMutableDictionary<NSString *, NSNumber *> *indexByID = objc_getAssociatedObject(controller, &kDYYYPrivateAwemeIndexByIDKey);
+
+    NSMutableSet<NSString *> *presentIDs = [NSMutableSet set];
+    for (id object in source) {
+        id aweme = DYYYAwemeFromPotentialWrapper(object);
+        NSString *identifier = DYYYPrivateAwemeIdentifier(aweme);
+        if (identifier.length > 0) {
+            [presentIDs addObject:identifier];
+        }
+    }
+
+    NSMutableArray *updated = nil;
+    NSMutableSet<NSString *> *privateIDs = DYYYPrivateAwemeIDs();
+    NSMutableDictionary<NSString *, id> *privateAwemes = DYYYPrivateAwemeCache();
+
+    @synchronized(privateIDs) {
+        for (NSString *identifier in privateIDs) {
+            if ([presentIDs containsObject:identifier] || ![previousIDs containsObject:identifier]) {
+                continue;
+            }
+
+            id aweme = privateAwemes[identifier];
+            if (!aweme) {
+                continue;
+            }
+
+            if (!updated) {
+                updated = [source mutableCopy];
+            }
+
+            NSUInteger insertIndex = updated.count;
+            NSNumber *savedIndex = indexByID[identifier];
+            if (savedIndex) {
+                insertIndex = MIN((NSUInteger)savedIndex.unsignedIntegerValue, updated.count);
+            }
+            [updated insertObject:aweme atIndex:insertIndex];
+            [presentIDs addObject:identifier];
+        }
+    }
+
+    NSArray *result = updated ?: source;
+    DYYYRememberDataControllerAwemes(controller, result);
+    return updated ?: dataSource;
+}
+
+static void DYYYUpdatePrivateAwemeBadgeForCell(id cell, id model) {
+    UIView *cellView = [cell isKindOfClass:[UIView class]] ? (UIView *)cell : nil;
+    if (!cellView) {
+        return;
+    }
+
+    BOOL shouldShow = DYYYShouldKeepPrivateAweme() && DYYYIsPrivateUnavailableAweme(DYYYAwemeFromPotentialWrapper(model));
+    UILabel *badge = objc_getAssociatedObject(cell, &kDYYYPrivateAwemeBadgeKey);
+
+    if (!shouldShow) {
+        [badge removeFromSuperview];
+        objc_setAssociatedObject(cell, &kDYYYPrivateAwemeBadgeKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        return;
+    }
+
+    if (!badge) {
+        badge = [[UILabel alloc] initWithFrame:CGRectZero];
+        badge.text = @"非公开视频";
+        badge.textColor = UIColor.whiteColor;
+        badge.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.62];
+        badge.font = [UIFont boldSystemFontOfSize:12.0];
+        badge.textAlignment = NSTextAlignmentCenter;
+        badge.layer.cornerRadius = 5.0;
+        badge.layer.masksToBounds = YES;
+        badge.userInteractionEnabled = NO;
+        objc_setAssociatedObject(cell, &kDYYYPrivateAwemeBadgeKey, badge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    if (badge.superview != cellView) {
+        [cellView addSubview:badge];
+    }
+
+    CGFloat topInset = 0.0;
+    if (@available(iOS 11.0, *)) {
+        topInset = cellView.safeAreaInsets.top;
+    }
+    badge.frame = CGRectMake(12.0, MAX(56.0, topInset + 44.0), 76.0, 24.0);
+    badge.hidden = NO;
+    [cellView bringSubviewToFront:badge];
 }
 
 static AWEAwemeModel *DYYYSpeedAwemeFromObject(id object) {
@@ -8252,13 +8507,20 @@ static NSHashTable *processedParentViews = nil;
 %hook AWEListDataController
 
 - (void)setDataSource:(NSMutableArray *)dataSource {
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
     %orig(filtered);
 }
 
 - (NSMutableArray *)dataSource {
     NSMutableArray *dataSource = %orig;
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
+    if (keptDataSource != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
+        [dataSource setArray:keptDataSource];
+    } else if (keptDataSource != dataSource) {
+        dataSource = [keptDataSource mutableCopy];
+    }
     if (filtered != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
         [dataSource setArray:filtered];
     } else if (filtered != dataSource) {
@@ -8268,13 +8530,20 @@ static NSHashTable *processedParentViews = nil;
 }
 
 - (void)setFilteredDataSource:(NSMutableArray *)filteredDataSource {
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:filteredDataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, filteredDataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
     %orig(filtered);
 }
 
 - (NSMutableArray *)filteredDataSource {
     NSMutableArray *filteredDataSource = %orig;
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:filteredDataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, filteredDataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
+    if (keptDataSource != filteredDataSource && [filteredDataSource isKindOfClass:[NSMutableArray class]]) {
+        [filteredDataSource setArray:keptDataSource];
+    } else if (keptDataSource != filteredDataSource) {
+        filteredDataSource = [keptDataSource mutableCopy];
+    }
     if (filtered != filteredDataSource && [filteredDataSource isKindOfClass:[NSMutableArray class]]) {
         [filteredDataSource setArray:filtered];
     } else if (filtered != filteredDataSource) {
@@ -8288,13 +8557,20 @@ static NSHashTable *processedParentViews = nil;
 %hook AWEMixVideoListDataController
 
 - (void)setDataSource:(id)dataSource {
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
     %orig(filtered);
 }
 
 - (id)dataSource {
     id dataSource = %orig;
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
+    if (keptDataSource != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
+        [dataSource setArray:keptDataSource];
+    } else if (keptDataSource != dataSource) {
+        dataSource = keptDataSource;
+    }
     if (filtered != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
         [dataSource setArray:filtered];
     } else if (filtered != dataSource) {
@@ -8308,7 +8584,8 @@ static NSHashTable *processedParentViews = nil;
 %hook AWEMixVideoDetailPlayListDataController
 
 - (void)setDataSource:(id)dataSource {
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
     %orig(filtered);
 }
 
@@ -8317,13 +8594,20 @@ static NSHashTable *processedParentViews = nil;
 %hook AWEMixVideoRelatedListDataController
 
 - (void)setDataSource:(id)dataSource {
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
     %orig(filtered);
 }
 
 - (id)dataSource {
     id dataSource = %orig;
-    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:dataSource];
+    id keptDataSource = DYYYDataSourceByKeepingPrivateAwemes(self, dataSource);
+    NSArray *filtered = [DYYYUtils arrayByRemovingAdvertisements:keptDataSource];
+    if (keptDataSource != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
+        [dataSource setArray:keptDataSource];
+    } else if (keptDataSource != dataSource) {
+        dataSource = keptDataSource;
+    }
     if (filtered != dataSource && [dataSource isKindOfClass:[NSMutableArray class]]) {
         [dataSource setArray:filtered];
     } else if (filtered != dataSource) {
@@ -11485,6 +11769,22 @@ static Class tabBarButtonClass = nil;
 
 %end
 
+%hook DUXToast
+
++ (void)showText:(NSString *)text {
+    if (DYYYShouldKeepPrivateAweme() && DYYYPrivateAwemeToastIndicatesUnavailable(text)) {
+        AWEAwemeModel *aweme = dyyyCurrentSpeedAweme;
+        if (!aweme) {
+            AWEPlayInteractionViewController *controller = DYYYResolveCurrentSpeedInteractionController(nil);
+            aweme = controller.model;
+        }
+        DYYYMarkAwemeAsPrivateUnavailable(aweme);
+    }
+    %orig(text);
+}
+
+%end
+
 %hook AWEPlayInteractionViewController
 
 - (void)onVideoPlayerViewDoubleClicked:(id)arg1 {
@@ -11835,6 +12135,8 @@ static Class tabBarButtonClass = nil;
         [hideButton hideUIElements];
     }
     %orig;
+    id model = objc_getAssociatedObject(self, &kDYYYPrivateAwemeCellModelKey);
+    DYYYUpdatePrivateAwemeBadgeForCell(self, model);
 }
 
 - (void)setModel:(id)model {
@@ -11842,6 +12144,8 @@ static Class tabBarButtonClass = nil;
         [hideButton hideUIElements];
     }
     %orig;
+    objc_setAssociatedObject(self, &kDYYYPrivateAwemeCellModelKey, model, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    DYYYUpdatePrivateAwemeBadgeForCell(self, model);
 }
 %end
 

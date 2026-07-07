@@ -1338,6 +1338,14 @@ void showDYYYSettingsVC(UIViewController *rootVC, BOOL hasAgreed) {
             @"detail" : @"",
             @"cellType" : @6,
             @"imageName" : @"ic_ad_outlined_20"},
+          @{
+              @"identifier" : @"DYYYKeepPrivateAweme",
+              @"title" : @"保留非公开视频（实验）",
+              @"subTitle" : @"提示当前内容为非公开时，尝试保留当前视频并打标签",
+              @"detail" : @"",
+              @"cellType" : @37,
+              @"imageName" : @"ic_lock_outlined_20"
+          },
           @{@"identifier" : @"DYYYHideTeenMode",
             @"title" : @"移除青少年弹窗",
             @"detail" : @"",
